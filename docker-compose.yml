@@ -1,0 +1,42 @@
+services:
+  docling:
+    image: ghcr.io/docling-project/docling-serve-cpu:latest
+    restart: unless-stopped
+    environment:
+      - DOCLING_SERVE_ENABLE_UI=0
+      - DOCLING_SERVE_LOAD_MODELS_AT_BOOT=true
+      - DOCLING_SERVE_ENABLE_REMOTE_SERVICES=false
+      - UVICORN_WORKERS=1
+      - OMP_NUM_THREADS=4
+      - MKL_NUM_THREADS=4
+    volumes:
+      - docling_cache:/root/.cache
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:5001/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    # no host port: gateway reaches it over the compose network
+
+  gateway:
+    build: ./gateway
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - DOCLING_URL=http://docling:5001
+      - DI_API_KEY=${DI_API_KEY:-}
+      - MAX_UPLOAD_MB=${MAX_UPLOAD_MB:-25}
+    depends_on:
+      docling:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  docling_cache:

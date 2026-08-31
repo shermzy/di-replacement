@@ -9,6 +9,7 @@ from typing import Any, Optional
 class Job:
     result_id: str
     model_id: str
+    api_version: str
     status: str = "running"  # running | succeeded | failed
     created: float = field(default_factory=time.time)
     updated: float = field(default_factory=time.time)
@@ -38,8 +39,8 @@ class JobStore:
     def __init__(self) -> None:
         self._jobs: dict[str, Job] = {}
 
-    def new(self, model_id: str) -> Job:
-        job = Job(result_id=str(uuid.uuid4()), model_id=model_id)
+    def new(self, model_id: str, api_version: str) -> Job:
+        job = Job(result_id=str(uuid.uuid4()), model_id=model_id, api_version=api_version)
         self._jobs[job.result_id] = job
         self._gc()
         return job

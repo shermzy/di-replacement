@@ -151,10 +151,50 @@ def test_analyze_result_shape():
     assert result["modelId"] == "prebuilt-invoice"
     assert result["stringIndexType"] == "textElements"
     assert "INV-2024-001" in result["content"]
+    assert len(result["paragraphs"]) == len(INVOICE_DOC["texts"])
     assert result["documents"][0]["docType"] == "invoice"
     assert len(result["tables"]) == 1
     assert result["tables"][0]["rowCount"] == 4
     assert len(result["keyValuePairs"]) == 5
+
+
+def test_real_docling_table_data_shape():
+    """Docling v1 emits table.data as {table_cells, num_rows, num_cols}."""
+    doc = {
+        "texts": [],
+        "tables": [{"data": {
+            "num_rows": 2, "num_cols": 3,
+            "table_cells": [
+                {"start_row_offset_idx": 0, "start_col_offset_idx": 0, "text": "Description"},
+                {"start_row_offset_idx": 0, "start_col_offset_idx": 1, "text": "Qty"},
+                {"start_row_offset_idx": 0, "start_col_offset_idx": 2, "text": "Amount"},
+                {"start_row_offset_idx": 1, "start_col_offset_idx": 0, "text": "Widget A"},
+                {"start_row_offset_idx": 1, "start_col_offset_idx": 1, "text": "10"},
+                {"start_row_offset_idx": 1, "start_col_offset_idx": 2, "text": "500.00"},
+            ],
+        }}],
+    }
+    feats = DocumentFeatures(doc)
+    assert feats.tables == [[
+        ["Description", "Qty", "Amount"],
+        ["Widget A", "10", "500.00"],
+    ]]
+    items = map_invoice(feats)["Items"]["valueArray"]
+    assert items[0]["valueObject"]["Description"]["valueString"] == "Widget A"
+    assert items[0]["valueObject"]["Amount"]["valueNumber"] == 500.0
+
+
+def test_merged_docling_text_block_splits_fields():
+    """Docling may merge several labelled fields into one text element."""
+    doc = {"texts": [{"text":
+        "Invoice No: INV-9   Invoice Date: 12/03/2024   "
+        "Due Date: 26/03/2024   Total: SGD 1,090.00"}],
+        "tables": []}
+    fields = map_invoice(DocumentFeatures(doc))
+    assert fields["InvoiceId"]["valueString"] == "INV-9"
+    assert fields["InvoiceDate"]["valueDate"] == "2024-03-12"
+    assert fields["DueDate"]["valueDate"] == "2024-03-26"
+    assert fields["InvoiceTotal"]["valueNumber"] == 1090.0
 
 
 # ---------------------------------------------------------------- API contract tests
@@ -226,7 +266,22 @@ def test_bad_api_version_400(client):
     assert r.status_code == 400
 
 
-def test_missing_key_401(monkeypatch):
+def test_result_preserves_requested_api_version(client):
+    r = client.post(
+        "/formrecognizer/documentModels/prebuilt-layout:analyze?api-version=2024-11-30",
+        content=b"%PDF", headers={"Content-Type": "application/pdf"},
+    )
+    loc = r.headers["Operation-Location"]
+    import time
+    for _ in range(50):
+        rr = client.get(loc)
+        if rr.json()["status"] == "succeeded":
+            break
+        time.sleep(0.1)
+    assert rr.json()["analyzeResult"]["apiVersion"] == "2024-11-30"
+
+
+def test_missing_key(monkeypatch):
     monkeypatch.setattr(config, "API_KEY", "sekret")
     monkeypatch.setattr(main, "engine", FakeEngine())
     c = TestClient(main.app)

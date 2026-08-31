@@ -4,3 +4,5 @@ __pycache__/
 .venv/
 azure-reference/
 .env
+gateway/sample_invoice.pdf
+gateway/real_doc.json

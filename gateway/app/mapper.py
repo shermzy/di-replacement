@@ -135,8 +135,29 @@ class DocumentFeatures:
             data = tbl.get("data")
             if not data:
                 continue
-            grid = [[self._resolve(cell) for cell in row] for row in data]
-            out.append(grid)
+            if isinstance(data, dict) and isinstance(data.get("table_cells"), list):
+                # Docling v1/v1.31 serializes TableData as a cell list with
+                # zero-based offsets, rather than as a 2-D matrix.
+                rows = int(data.get("num_rows") or 0)
+                cols = int(data.get("num_cols") or 0)
+                cells = data["table_cells"]
+                if not rows:
+                    rows = max((int(c.get("end_row_offset_idx") or
+                                    c.get("start_row_offset_idx", 0)) for c in cells), default=-1) + 1
+                if not cols:
+                    cols = max((int(c.get("end_col_offset_idx") or
+                                    c.get("start_col_offset_idx", 0)) for c in cells), default=-1) + 1
+                grid = [["" for _ in range(cols)] for _ in range(rows)]
+                for cell in cells:
+                    r = int(cell.get("start_row_offset_idx", 0))
+                    c = int(cell.get("start_col_offset_idx", 0))
+                    if 0 <= r < rows and 0 <= c < cols:
+                        grid[r][c] = self._resolve(cell)
+                out.append(grid)
+                continue
+            if isinstance(data, list):
+                grid = [[self._resolve(cell) for cell in row] for row in data]
+                out.append(grid)
         return out
 
     def kv_lookup(self, labels: list[str]) -> Optional[tuple[str, str]]:
@@ -154,12 +175,20 @@ class DocumentFeatures:
         return None
 
     def line_lookup(self, labels: list[str]) -> Optional[str]:
-        """Regex scan of raw text lines for 'Label[:] value'."""
-        nlabels = [normalize_key(l) for l in labels]
-        for line in self.texts:
-            m = re.match(r"^\s*([^:]+?)\s*[:]\s*(.+)\s*$", line)
-            if m and normalize_key(m.group(1)) in nlabels:
-                return m.group(2)
+        """Find 'Label[:] value' inside text blocks, cutting at the next label.
+
+        Handles both one-field-per-line and the engine's merged blocks like
+        'Invoice No: X Invoice Date: Y ...' (which is what Docling actually emits).
+        """
+        for label in labels:
+            lab = re.escape(label)
+            pat = re.compile(
+                r"(?:^|\s)" + lab + LABEL_PREFIX_RE + r"(.+?)(?=\s*$|"
+                + NEXT_LABEL_RE.pattern + r")", re.IGNORECASE | re.DOTALL)
+            for t in self.texts:
+                m = pat.search(t)
+                if m:
+                    return m.group(1).strip()
         return None
 
     def text_find(self, pattern: str) -> Optional[str]:
@@ -208,6 +237,18 @@ PO_LABELS = {
     "TotalTax": ["tax", "gst", "vat", "total tax"],
     "TotalAmount": ["total", "grand total", "total amount", "amount payable"],
 }
+
+_ALL_LABEL_TOKENS: list[str] = []
+for _table in (INVOICE_LABELS, PO_LABELS):
+    for _labels in _table.values():
+        _ALL_LABEL_TOKENS.extend(_labels)
+_ALL_LABEL_TOKENS = sorted({re.escape(t) for t in _ALL_LABEL_TOKENS}, key=len, reverse=True)
+
+# matches " <label>(...):" start of a following field inside one text block
+NEXT_LABEL_RE = re.compile(
+    r"\s+(?:" + "|".join(_ALL_LABEL_TOKENS) + r")\s*(?:\([^)]*\))?\s*[:#]", re.IGNORECASE)
+# matches "<label>(...):" at a value position
+LABEL_PREFIX_RE = r"\s*(?:\([^)]*\))?\s*[:#]?\s*"
 
 ITEM_HEADERS = {
     "description": ["description", "item", "particulars", "product", "goods", "description of goods", "item description"],
@@ -317,6 +358,11 @@ def map_invoice(doc: DocumentFeatures) -> dict:
         f = _map_scalar(doc, key, labels, kind, 0.9)
         if f.get("valueString") or f.get("valueNumber") is not None or f.get("valueDate"):
             fields[key] = f
+    # vendor name fallback: first text line is usually the company header
+    if "VendorName" not in fields and doc.texts:
+        head = doc.texts[0].strip()
+        if head and len(head) < 80:
+            fields["VendorName"] = f_string(head, head, 0.5)
     items = map_items(doc)
     if items:
         fields["Items"] = f_array(items)
@@ -355,6 +401,20 @@ def build_pages(doc: DocumentFeatures) -> list[dict]:
             "unit": "inch",
         })
     return pages or [{"pageNumber": 1, "width": 8.5, "height": 11.0, "unit": "inch"}]
+
+
+def build_paragraphs(doc: DocumentFeatures) -> list[dict]:
+    paragraphs = []
+    offset = 0
+    for text in doc.texts:
+        if text:
+            paragraphs.append({
+                "content": text,
+                "boundingRegions": [],
+                "spans": [{"offset": offset, "length": len(text)}],
+            })
+        offset += len(text) + 1  # full_text joins text elements with newline
+    return paragraphs
 
 
 def _span_for(content: str, needle: str) -> list[dict]:
@@ -402,6 +462,7 @@ def build_analyze_result(model_id: str, api_version: str, doc: dict,
         "stringIndexType": "textElements",
         "content": feats.full_text,
         "pages": build_pages(feats),
+        "paragraphs": build_paragraphs(feats),
         "tables": build_azure_tables(feats),
         "keyValuePairs": build_kv_pairs(feats),
     }

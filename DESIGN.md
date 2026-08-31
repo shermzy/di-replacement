@@ -27,10 +27,10 @@ Supported modelIds on day 1:
 |   gateway   |  ->  202 + Operation-Location header (api-version=2023-07-31)
 |  FastAPI    |      GET  .../analyzeResults/{resultId}  (status, then result)
 +-----+-------+
-      | job queue (SQLite, single-process async worker)
+      | in-memory job store (single-process async worker)
       v
-+-------------+      /v1alpha/convert/file   (docling-serve-cpu)
-|   engine    |  ->  layout + tables + OCR text, JSON
++-------------+      /v1/convert/file (docling-serve v1)
+|   engine    |  ->  Docling JSON: OCR text + layout + tables
 |  docling    |
 +-----+-------+
       |
@@ -42,7 +42,12 @@ Supported modelIds on day 1:
 
 Two containers on Coolify:
 1. `gateway` — our FastAPI app (custom Dockerfile)
-2. `docling-serve-cpu` — `ghcr.io/docling-project/docling-serve-cpu:latest` (unmodified)
+2. `docling` — `ghcr.io/docling-project/docling-serve-cpu:latest` (unmodified)
+
+The gateway uses Docling's stable v1 API. It keeps the Azure-compatible analysis
+job in an in-memory store, so deploy it as one gateway worker; a restart discards
+in-flight/results. Add Redis/Postgres before running long-lived or multi-worker
+production workloads.
 
 Both CPU-only. ~2–4 GB RAM; a 2-page invoice ≈ 5–15 s cold, ~3–8 s warm.
 
@@ -50,7 +55,7 @@ Both CPU-only. ~2–4 GB RAM; a 2-page invoice ≈ 5–15 s cold, ~3–8 s warm.
 
 Request:
 - `POST /formrecognizer/documentModels/{modelId}:analyze?api-version=2023-07-31`
-- Header `Ocp-Apim-Subscription-Key` — accepted, value checked against env `API_KEY` (empty = accept any)
+- Header `Ocp-Apim-Subscription-Key` — accepted, value checked against env `DI_API_KEY` (empty = development/no authentication; set it in Coolify)
 - Body either raw file bytes (`Content-Type: application/pdf|image/*`) or JSON `{"urlSource": "https://..."}`
 - Optional `features=ocrHighResolution` ignored gracefully
 
@@ -61,8 +66,11 @@ Response flow (must match Azure exactly):
 3. Errors: `400` invalid request, `404` unknown model/result — same shape as Azure's
    `error` object (`code`, `message`).
 
-Result body carries the standard objects: `content`, `pages`, `paragraphs`,
-`tables` (cells with spans/boundingRegions), `keyValuePairs`, `documents[].fields`.
+Result body carries the standard objects currently implemented: `content`, `pages`,
+`paragraphs`, `tables` (cells with spans/boundingRegions), `keyValuePairs`, and
+`documents[].fields`. The layout/read models are intentionally a useful subset,
+not a complete Azure replacement for words, selection marks, figures, or custom
+models.
 
 ## 4. Invoice field schema (matches Azure prebuilt-invoice)
 
@@ -76,9 +84,9 @@ RemittanceAddressRecipient, ServiceAddress, ServiceAddressRecipient, TaxDetails.
 Items[] (line items): Description, Quantity, Unit, UnitPrice, Amount, Tax, TaxRate,
 ProductCode, Date.
 
-Each field: `{type, valueString|valueNumber|valueDate|valueArray, content, confidence, boundingRegions, spans}`.
-Missing field = `value*` null, confidence 0 — identical to Azure, so consumers'
-null-handling keeps working unchanged.
+Each recognized field: `{type, valueString|valueNumber|valueDate|valueArray, content, confidence, boundingRegions, spans}`.
+Absent fields are omitted in this MVP (rather than synthesizing null values), so
+n8n validation must treat missing fields as review-required.
 
 PO schema (ours): PurchaseOrderNumber, VendorName, VendorAddress, ShipToName,
 ShipToAddress, BillToName, BillToAddress, OrderDate, RequestedDeliveryDate,
@@ -110,6 +118,8 @@ a field. Fail-closed is a consumer concern (n8n validation), not the OCR service
   (VendorName, InvoiceDate, InvoiceTotal, Items.Description/Quantity/Amount);
   tables cell-for-cell ≥ 85%.
 - Per-request latency under 30 s p95 on CPU host.
+- Local smoke test verified against Docling Serve v1.31.0 with a real generated
+  invoice: 202 Accepted → poll → invoice fields + 2 line items.
 
 ## 7. Open questions (decide one at a time)
 

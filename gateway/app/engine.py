@@ -1,13 +1,7 @@
-"""Docling-serve client.
-
-Tries the stable v1 API first, falls back to the legacy v1alpha API.
-"""
-import logging
+"""Docling-serve v1 client."""
 from typing import Any
 
 import httpx
-
-log = logging.getLogger("di.engine")
 
 
 class EngineError(Exception):
@@ -40,11 +34,7 @@ class DoclingClient:
             "ocr_engine": "easyocr",
             "ocr_lang": "en",
         }
-        try:
-            return await self._v1(filename, data, content_type, form)
-        except EngineError as e:
-            log.warning("v1 endpoint failed (%s), trying v1alpha", e)
-            return await self._v1alpha(filename, data, content_type, form)
+        return await self._v1(filename, data, content_type, form)
 
     async def _post_file(self, path: str, filename: str, data: bytes, content_type: str, form: dict):
         async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -69,32 +59,3 @@ class DoclingClient:
         if any(k in payload for k in ("pages", "texts", "tables")):
             return payload
         raise EngineError(f"engine returned no json_content: {str(payload)[:200]}")
-
-    async def _v1alpha(self, filename: str, data: bytes, content_type: str, form: dict) -> dict[str, Any]:
-        r = await self._post_file("/v1alpha/convert/file", filename, data, content_type, form)
-        payload = r.json()
-        doc = payload.get("document") or {}
-        source_key = doc.get("source_key")
-        if source_key:
-            return await self._poll_v1alpha(source_key)
-        if doc.get("json_content"):
-            return doc["json_content"]
-        raise EngineError("v1alpha returned no result")
-
-    async def _poll_v1alpha(self, source_key: str) -> dict[str, Any]:
-        import asyncio
-
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            for _ in range(240):  # up to ~20 min
-                r = await client.get(f"{self.base_url}/v1alpha/convert/source/{source_key}")
-                if r.status_code >= 400:
-                    raise EngineError(f"poll HTTP {r.status_code}")
-                payload = r.json()
-                status = (payload.get("document") or {}).get("status")
-                if status in ("success", "partial_success") or "pages" in payload:
-                    doc = payload.get("document") or {}
-                    return doc.get("json_content") or payload
-                if status == "failure":
-                    raise EngineError("engine conversion failed")
-                await asyncio.sleep(5)
-        raise EngineError("engine conversion timed out")

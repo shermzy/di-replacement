@@ -99,7 +99,7 @@ async def analyze(
                         f"Unsupported Content-Type '{content_type}'. "
                         "Use application/pdf, image/*, or application/json with urlSource.", 400)
 
-    job = store.new(model_id)
+    job = store.new(model_id, api_version)
     asyncio.create_task(_process(job, model_id, filename, data, content_type))
     location = (f"{request.base_url}formrecognizer/documentModels/{model_id}"
                 f"/analyzeResults/{job.result_id}?api-version={api_version}")
@@ -134,7 +134,7 @@ async def _process(job: jobs_mod.Job, model_id: str, filename: str,
             fields, doc_type = map_po(feats), "purchaseOrder"
         else:
             fields, doc_type = None, None
-        job.result = build_analyze_result(model_id, "2023-07-31", doc, fields, doc_type)
+        job.result = build_analyze_result(model_id, job.api_version, doc, fields, doc_type)
         job.status = "succeeded"
         log.info("job %s succeeded in %.1fs", job.result_id, time.time() - started)
     except engine_mod.EngineError as e:
